@@ -1,13 +1,13 @@
-# AI Project Template
-
-A starter template for Python AI/ML apps with environment handling, dependencies, and a clean structure.
+# Fast API summatizer
 
 ## Setup
+
+1. Install requirements
+   pip install -r requirements.txt
+
 
 1. Create and activate a virtual environment:
    ```bash
    python -m venv .venv
    # Windows PowerShell
    .venv\Scripts\Activate
-   # macOS/Linux
-   # source .venv/bin/activate
