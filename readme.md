@@ -1,4 +1,4 @@
-# Fast API summatizer
+# Fast API summarizer
 
 ## Setup
 
