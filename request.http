@@ -1,0 +1,60 @@
+@env=dev
+# =============================
+# requests.http (PyCharm HTTP client)
+# =============================
+
+### Test environment
+GET https://postman-echo.com/get
+X-API-Key: {{API_KEY}}
+
+### Health check
+GET http://127.0.0.1:8000/health
+X-API-Key: {{API_KEY}}
+
+
+### Summarize (English)
+POST http://127.0.0.1:8000/summarize
+Content-Type: application/json
+X-API-Key: {{API_KEY}}
+
+
+{
+"text": "Large language models (LLMs) excel at pattern recognition but can hallucinate. Retrieval-augmented generation (RAG) combines an LLM with a vector search to ground responses in documents.",
+"max_words": 40,
+"language": "en",
+"tone": "neutral"
+}
+
+
+### Summarize (Danish)
+POST http://127.0.0.1:8000/summarize
+Content-Type: application/json
+X-API-Key: {{API_KEY}}
+
+
+{
+"text": "Store sprogmodeller er stærke til mønstergenkendelse, men kan hallucinere. RAG kombinerer en LLM med vektorsøgning, så svarene forankres i dokumenter.",
+"max_words": 40,
+"language": "da",
+"tone": "neutral"
+}
+
+
+### Summarize from file (.txt)
+POST http://127.0.0.1:8000/summarize-file
+X-API-Key: {{API_KEY}}
+Content-Type: multipart/form-data
+
+
+# In PyCharm HTTP client, click 'Add File' field named 'file' and select your .txt.
+# Add 'max_words' as a form field (e.g., 120).
+
+
+### Summarize from file (.pdf)
+POST http://127.0.0.1:8000/summarize-file
+X-API-Key: {{API_KEY}}
+Content-Type: multipart/form-data
+
+
+# Attach a PDF as 'file' and add 'max_words=150' (optional 'language=da').
+"""

@@ -2,12 +2,14 @@
 # main.py  — Secure FastAPI Summarizer API (with API key, CORS allowlist, input limits, rate limiting)
 # =============================
 from typing import Optional, List
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, conint, constr
 import os
 import logging
+import io
+import pdfplumber
 
 from dotenv import load_dotenv
 
@@ -137,14 +139,20 @@ async def summarize(
     tone_hint = f" Tone: {payload.tone}." if payload.tone else ""
 
     system_msg = (
-        "You are a helpful assistant that writes concise, faithful summaries. "
-        "Respect factual accuracy and do not invent details."
+        "You are a summarizer. Produce a faithful, concise summary."
+        "Hard constraints:"
+        " • Maximum length: {max_words} words."
+        " • Do NOT copy sentences; rephrase. Never quote more than 3 consecutive words from the input."
+        " • Output ONLY the summary text (no intro, no headings)."
+        " • If the input is already short, still compress to the essentials."
     )
+
     user_msg = (
-        f"Summarize the following text in at most {payload.max_words} words.{tone_hint}"
-        + (f" Write the summary in{lang_hint}." if lang_hint else "")
-        + ""
-        + payload.text
+            f"Summarize the following text in at most {payload.max_words} words."
+            + (f" Write the summary in Danish (da)." if (payload.language or '').lower().startswith('da') else
+               f" Write the summary in English (en)." if payload.language else "")
+            + (f" Tone: {payload.tone}." if payload.tone else "")
+            + "" + payload.text
     )
 
     try:
@@ -163,10 +171,16 @@ async def summarize(
             cast(ChatCompletionUserMessageParam, cast(object, {"role": "user", "content": user_msg_text})),
         ]
 
+        # compute a conservative token cap to keep outputs short
+        max_tokens_cap = max(64, int(payload.max_words * 2.2))
+
         chat = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=messages,
-            temperature=0.3,
+            temperature=0.2,
+            max_tokens=max_tokens_cap,
+            presence_penalty=0.0,
+            frequency_penalty=0.6,
         )
 
         summary_text = (chat.choices[0].message.content or "").strip()
@@ -186,3 +200,41 @@ async def summarize(
     except Exception:
         logging.exception("Summarization failed")  # internal log only
         raise HTTPException(status_code=500, detail="Internal error")
+
+
+# ---- File upload endpoint: /summarize-file (.txt and .pdf) ----
+@app.post("/summarize-file", dependencies=[Depends(require_api_key)])
+@limiter.limit("5/minute")
+async def summarize_file(
+    request: Request,
+    file: UploadFile = File(...),
+    max_words: int = 120,
+    language: Optional[str] = None,
+    tone: Optional[str] = None,
+):
+    # Read bytes
+    data = await file.read()
+
+    # Detect and extract text
+    fname = (file.filename or "").lower()
+    ctype = (file.content_type or "").lower()
+
+    if fname.endswith(".txt") or "text/plain" in ctype:
+        text = data.decode("utf-8", errors="ignore")
+    elif fname.endswith(".pdf") or "application/pdf" in ctype or ".pdf" in fname:
+        try:
+            with pdfplumber.open(io.BytesIO(data)) as pdf:
+                text = "".join((page.extract_text() or "") for page in pdf.pages)
+        except Exception:
+            logging.exception("PDF extraction failed")
+            raise HTTPException(status_code=400, detail="Failed to extract text from PDF")
+    else:
+        raise HTTPException(status_code=415, detail="Unsupported file type. Use .txt or .pdf")
+
+    # Validate minimal content
+    if not text or text.strip() == "":
+        raise HTTPException(status_code=400, detail="No extractable text in file")
+
+    # Reuse existing summarization logic
+    payload = SummarizeRequest(text=text, max_words=max_words, language=language, tone=tone)
+    return await summarize(request, payload)

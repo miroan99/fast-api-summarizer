@@ -18,8 +18,11 @@ httpx==0.27.2
 pydantic==2.9.2
 slowapi==0.1.9
 limits==3.13.0
+pdfplumber==0.11.4
+python-multipart==0.0.9
+
 # Optional: for distributed rate limiting storage (instead of in-memory)
-# redis==5.0.8
+# redis==5.0.8# Optional: for distributed rate limiting storage (instead of in-memory)
 
 # Data science stack
 numpy
