@@ -35,6 +35,10 @@ CORS_ORIGINS = [
     if o.strip()
 ]
 
+# Check keys
+if OPENAI_BASE_URL and not OPENAI_API_KEY:
+    OPENAI_API_KEY = "lm-studio"   # dummy
+
 # --- OpenAI client (SDK v1 style) ---
 try:
     from openai import OpenAI
@@ -47,8 +51,76 @@ try:
 except Exception:
     client = None
 
+logging.basicConfig(level=logging.INFO)
+
+def _summarize_with_model(text: str, max_words: int, language: Optional[str], tone: Optional[str]) -> str:
+    if client is None:
+        raise HTTPException(status_code=500, detail="OpenAI client not initialized. Check dependencies.")
+
+    if not OPENAI_API_KEY and not OPENAI_BASE_URL:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing OPENAI_API_KEY. Set it in .env. If using LM Studio, set OPENAI_BASE_URL and a dummy key.",
+        )
+
+    # Sprogvalg: kun 'da' eller 'en'; ellers ingen tvang
+    lang = (language or "").lower()
+    lang_part = " Write the summary in Danish (da)." if lang.startswith("da") else (" Write the summary in English (en)." if lang.startswith("en") else "")
+    tone_part = f" Tone: {tone}." if tone else ""
+
+    system_msg = (
+        f"You are a summarizer. Produce a faithful, concise summary.\n"
+        f"Hard constraints:\n"
+        f" • Maximum length: {max_words} words.\n"
+        f" • Do NOT copy sentences; rephrase. Never quote more than 3 consecutive words from the input.\n"
+        f" • Output ONLY the summary text (no intro, no headings).\n"
+        f" • If the input is already short, still compress to the essentials."
+    )
+    user_msg = f"Summarize the following text in at most {max_words} words." + lang_part + tone_part + "\n\n" + text
+
+    try:
+        from typing import List, cast
+        from openai.types.chat import (
+            ChatCompletionMessageParam,
+            ChatCompletionSystemMessageParam,
+            ChatCompletionUserMessageParam,
+        )
+
+        messages: List[ChatCompletionMessageParam] = [
+            cast(ChatCompletionSystemMessageParam, {"role": "system", "content": system_msg}),
+            cast(ChatCompletionUserMessageParam, {"role": "user", "content": user_msg}),
+        ]
+        max_tokens_cap = max(64, int(max_words * 2.2))
+        chat = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=max_tokens_cap,
+            presence_penalty=0.0,
+            frequency_penalty=0.6,
+        )
+        summary_text = (chat.choices[0].message.content or "").strip()
+        if not summary_text:
+            raise HTTPException(status_code=500, detail="Model returned empty content.")
+        return summary_text
+    except AuthenticationError:
+        raise HTTPException(status_code=401, detail="Model authentication failed. Check API key.")
+    except PermissionDeniedError:
+        raise HTTPException(status_code=403, detail="Model access denied. Check model permissions.")
+    except Exception:
+        logging.exception("Summarization failed")
+        raise HTTPException(status_code=500, detail="Internal error")
+
 # --- Create app
 app = FastAPI(title="Summarizer API", version="0.2.0")
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logging.info(f"{request.method} {request.url.path}")
+    response = await call_next(request)
+    logging.info(f"Completed with status {response.status_code}")
+    return response
+
 
 # CORS: allow only whitelisted origins
 app.add_middleware(
@@ -66,7 +138,6 @@ limiter = Limiter(
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 
-
 # Handle rate limit errors with sanitized message
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -79,7 +150,7 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 # Clients must send:  X-API-Key: <your key>
 
 
-def require_api_key(x_api_key: Optional[str] = Header(default=None)):
+def require_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
     if not API_KEY or x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -115,95 +186,21 @@ from openai import AuthenticationError, PermissionDeniedError
 
 @app.post("/summarize", response_model=SummarizeResponse, dependencies=[Depends(require_api_key)])
 @limiter.limit("10/minute")
-async def summarize(
-    request: Request, payload: SummarizeRequest
-):  # ← add request: Request (first arg)
-    if client is None:
-        raise HTTPException(
-            status_code=500, detail="OpenAI client not initialized. Check dependencies."
-        )
-
-    if not OPENAI_API_KEY and not OPENAI_BASE_URL:
-        # For LM Studio, you still need some API key value (can be 'lm-studio')
-        raise HTTPException(
-            status_code=400,
-            detail="Missing OPENAI_API_KEY. Set it in .env. If using LM Studio, set OPENAI_BASE_URL and a dummy key.",
-        )
-
-    # Build prompt with minimal metadata; avoid leaking secrets in errors
-    lang_hint = (
-        f" Danish (da)"
-        if (payload.language or "").lower().startswith("da")
-        else (" English (en)" if payload.language else "")
+async def summarize(request: Request, payload: SummarizeRequest):
+    summary_text = _summarize_with_model(
+        text=payload.text,
+        max_words=payload.max_words,
+        language=payload.language,
+        tone=payload.tone,
     )
-    tone_hint = f" Tone: {payload.tone}." if payload.tone else ""
-
-    system_msg = (
-        "You are a summarizer. Produce a faithful, concise summary."
-        "Hard constraints:"
-        " • Maximum length: {max_words} words."
-        " • Do NOT copy sentences; rephrase. Never quote more than 3 consecutive words from the input."
-        " • Output ONLY the summary text (no intro, no headings)."
-        " • If the input is already short, still compress to the essentials."
-    )
-
-    user_msg = (
-            f"Summarize the following text in at most {payload.max_words} words."
-            + (f" Write the summary in Danish (da)." if (payload.language or '').lower().startswith('da') else
-               f" Write the summary in English (en)." if payload.language else "")
-            + (f" Tone: {payload.tone}." if payload.tone else "")
-            + "" + payload.text
-    )
-
-    try:
-        from typing import List, cast
-        from openai.types.chat import (
-            ChatCompletionMessageParam,
-            ChatCompletionSystemMessageParam,
-            ChatCompletionUserMessageParam,
-        )
-
-        system_msg_text = system_msg
-        user_msg_text = user_msg
-
-        messages: List[ChatCompletionMessageParam] = [
-            cast(ChatCompletionSystemMessageParam, cast(object, {"role": "system", "content": system_msg_text})),
-            cast(ChatCompletionUserMessageParam, cast(object, {"role": "user", "content": user_msg_text})),
-        ]
-
-        # compute a conservative token cap to keep outputs short
-        max_tokens_cap = max(64, int(payload.max_words * 2.2))
-
-        chat = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=max_tokens_cap,
-            presence_penalty=0.0,
-            frequency_penalty=0.6,
-        )
-
-        summary_text = (chat.choices[0].message.content or "").strip()
-        return SummarizeResponse(
-            summary=summary_text, words=len(summary_text.split()), model=OPENAI_MODEL
-        )
-
-    except AuthenticationError:
-        # Wrong/missing scopes or invalid key
-        raise HTTPException(
-            status_code=401, detail="Model authentication failed. Check API key scopes/project."
-        )
-    except PermissionDeniedError:
-        raise HTTPException(
-            status_code=403, detail="Model access denied. Check your project’s model permissions."
-        )
-    except Exception:
-        logging.exception("Summarization failed")  # internal log only
-        raise HTTPException(status_code=500, detail="Internal error")
-
+    return SummarizeResponse(summary=summary_text, words=len(summary_text.split()), model=OPENAI_MODEL)
 
 # ---- File upload endpoint: /summarize-file (.txt and .pdf) ----
-@app.post("/summarize-file", dependencies=[Depends(require_api_key)])
+@app.post(
+    "/summarize-file",
+    response_model=SummarizeResponse,
+    dependencies=[Depends(require_api_key)],
+)
 @limiter.limit("5/minute")
 async def summarize_file(
     request: Request,
@@ -212,10 +209,7 @@ async def summarize_file(
     language: Optional[str] = None,
     tone: Optional[str] = None,
 ):
-    # Read bytes
     data = await file.read()
-
-    # Detect and extract text
     fname = (file.filename or "").lower()
     ctype = (file.content_type or "").lower()
 
@@ -224,17 +218,20 @@ async def summarize_file(
     elif fname.endswith(".pdf") or "application/pdf" in ctype or ".pdf" in fname:
         try:
             with pdfplumber.open(io.BytesIO(data)) as pdf:
-                text = "".join((page.extract_text() or "") for page in pdf.pages)
+                pages = [(page.extract_text() or "") for page in pdf.pages]
+            text = "\n".join(pages).strip()
         except Exception:
             logging.exception("PDF extraction failed")
             raise HTTPException(status_code=400, detail="Failed to extract text from PDF")
     else:
         raise HTTPException(status_code=415, detail="Unsupported file type. Use .txt or .pdf")
 
-    # Validate minimal content
     if not text or text.strip() == "":
         raise HTTPException(status_code=400, detail="No extractable text in file")
 
-    # Reuse existing summarization logic
-    payload = SummarizeRequest(text=text, max_words=max_words, language=language, tone=tone)
-    return await summarize(request, payload)
+    summary_text = _summarize_with_model(text=text, max_words=max_words, language=language, tone=tone)
+    return SummarizeResponse(
+        summary=summary_text,
+        words=len(summary_text.split()),
+        model=OPENAI_MODEL,
+    )

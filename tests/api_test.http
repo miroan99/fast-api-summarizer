@@ -1,0 +1,29 @@
+### Health
+GET http://127.0.0.1:8000/health
+
+### Summarize JSON
+POST http://127.0.0.1:8000/summarize
+X-API-Key: {{API_KEY}}
+Content-Type: application/json
+
+{
+  "text": "Dette er en testtekst, som skal opsummeres.",
+  "max_words": 50,
+  "language": "da"
+}
+
+### Summarize file
+POST http://127.0.0.1:8000/summarize-file
+X-API-Key: {{API_KEY}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="sample.pdf"
+Content-Type: application/pdf
+
+< ./docs/sample.pdf
+--WebAppBoundary
+Content-Disposition: form-data; name="max_words"
+
+120
+--WebAppBoundary--
